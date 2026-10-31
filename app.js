@@ -1,5 +1,6 @@
 import { readWorkspace, saveWorkspace, saveRecovery, readRecovery, migratePrototype, withWorkspaceLock } from './db.js';
-import { uid, localDate, emptyData, sampleData, validateData, paidFor, balanceFor, cents, minutes, STATUSES, METHODS } from './domain.js';
+import { uid, localDate, emptyData, sampleData, validateData, paidFor, balanceFor, cents, minutes, STATUSES, METHODS, appointmentHasHistory, validateAppointmentChange, csvCell } from './domain.js';
+import { prepareChange, acknowledgeBackup } from './workspace.js';
 
 const $ = selector => document.querySelector(selector);
 const main = $('#main'), editor = $('#editor');
@@ -78,7 +79,7 @@ async function sync() {
       if (remote.data && !state.dirty && generation === state.generation && remote.revision !== state.revision) {
         validateData(remote.data);
         state = { ...state, data: remote.data, generation: uid(), revision: remote.revision, syncedAt: remote.updatedAt };
-        await saveWorkspace(state); channel?.postMessage('changed'); if (!editor.open) render();
+        await saveWorkspace(state); channel?.postMessage('changed'); if (!hasUnsavedChanges() && !editor.open) render();
       }
       });
     } else {
@@ -87,27 +88,25 @@ async function sync() {
       await withWorkspaceLock(async () => {
         const latest = await readWorkspace();
         if (latest) state = latest;
-        state = { ...state, revision: result.revision, syncedAt: result.updatedAt, dirty: state.generation !== generation };
+        state = acknowledgeBackup(state, generation, result);
         await saveWorkspace(state); channel?.postMessage('changed');
       });
     }
     });
   } catch (error) {
-    if (error.status === 409) { conflict = true; if (section === 'ajustes') render(); toast('Hay cambios en otro navegador. Revisa el respaldo en Ajustes.'); }
+    if (error.status === 409) { conflict = true; if (section === 'ajustes') render(); toast('Hay cambios en otro navegador. Revisa el respaldo en Configuración.'); }
     else syncError = error.message;
   } finally { syncBusy = false; syncStatus(); }
   if (state.dirty && !syncError && !conflict) queueMicrotask(sync);
 }
-async function commit(mutator, message) {
+async function commit(mutator, message, expectedGeneration = state.generation, recovery = false) {
   if (uiSaving) throw new Error('Espera a que termine el guardado anterior.');
   uiSaving = true;
-  const generation = state.generation;
   try {
     await withWorkspaceLock(async () => {
-    const current = await readWorkspace();
-    if (current && current.generation !== generation) { state = current; render(); throw new Error('Otra pestaña modificó los datos. Revisa la vista actual y vuelve a intentarlo.'); }
-    const next = structuredClone(data()); mutator(next); validateData(next);
-    const nextState = { ...state, data: next, generation: uid(), dirty: true, changedAt: new Date().toISOString() };
+    const current = await readWorkspace() || state;
+    const nextState = prepareChange(current, expectedGeneration, mutator);
+    if (recovery) await saveRecovery(current);
     await saveWorkspace(nextState); state = nextState;
     channel?.postMessage('changed'); syncStatus(); render(); if (message) toast(message);
     });
@@ -203,7 +202,7 @@ function renderSettings() {
     (conflict ? '<div class="notice"><strong>Hay cambios guardados desde otro navegador.</strong> Tu versión local sigue protegida. Descárgala antes de cargar la versión del servidor.<div class="button-group">' + btn('Descargar mis datos locales', 'export-backup') + btn('Cargar versión del servidor', 'resolve-conflict') + '</div></div>' : '') +
     '<div class="settings-grid"><section class="panel settings-card"><h2>Datos de la consulta</h2><form id="settings-form"><label>Nombre del espacio<input name="practice" value="' + esc(s.practice) + '" required maxlength="100"></label><label>Profesional<input name="professional" value="' + esc(s.professional) + '" maxlength="120"></label><div class="form-row"><label>Inicio de jornada<input name="start" type="time" value="' + s.start + '" required></label><label>Fin de jornada<input name="end" type="time" value="' + s.end + '" required></label></div><label>Avisar antes de la cita<select name="reminderMinutes">' + [5, 10, 15, 30, 60].map(n => '<option value="' + n + '"' + (n === s.reminderMinutes ? ' selected' : '') + '>' + n + ' minutos</option>').join('') + '</select></label><div class="form-error" role="alert" hidden></div><button class="btn primary" type="submit">Guardar configuración</button></form></section>' +
     '<section class="panel settings-card"><h2>Datos y respaldo</h2><p>Tus registros se guardan en este navegador. Cuando el servidor local está disponible, también se crea una copia en esta computadora. Puedes descargar un respaldo para guardarlo por separado.</p><div class="info-line"><strong>Estado actual</strong><br><span id="settings-sync-copy">' + esc($('#sync-copy').textContent) + '</span><br><small id="settings-sync-time">' + (state.syncedAt ? 'Último respaldo: ' + datetime(state.syncedAt) : 'Todavía no hay un respaldo confirmado.') + '</small></div><div class="button-group">' + btn('Respaldar ahora', 'sync') + btn('Descargar respaldo JSON', 'export-backup') + '</div><label>Restaurar respaldo<input id="import-backup" type="file" accept=".json,application/json"></label><p>Antes de restaurar se conserva una copia de recuperación de tu información actual.</p><div class="button-group">' + btn('Recuperar copia anterior', 'recover') + '</div></section>' +
-    '<section class="panel settings-card"><h2>Recordatorios de citas</h2><p>Recibe avisos locales mientras Azora está abierta. El navegador solicita permiso solo cuando activas esta opción.</p><div class="button-group">' + btn('Permitir avisos de citas', 'enable-notifications') + '</div><p>Permiso: ' + ('Notification' in window ? esc(Notification.permission) : 'No disponible en este navegador') + '. Los avisos con la aplicación cerrada y los mensajes al paciente requieren un servicio Push externo.</p></section><section class="panel settings-card"><h2>Acerca de esta versión</h2><p>Azora 1.1 · espacio local para una práctica independiente. Agenda, pacientes, notas de seguimiento, pagos manuales y exportación de comprobantes.</p><div class="info-line">El servidor acepta conexiones únicamente desde esta computadora. El respaldo no es una cuenta en la nube.</div><div class="info-line">Los pagos se registran manualmente. Los cargos y las devoluciones se realizan por fuera de Azora.</div><p>La información de este espacio se utiliza desde esta computadora. No hay una cuenta en la nube.</p></section></div></div>';
+    '<section class="panel settings-card"><h2>Recordatorios de citas</h2><p>Recibe avisos locales mientras Azora está abierta. El navegador solicita permiso solo cuando activas esta opción.</p><div class="button-group">' + btn('Permitir avisos de citas', 'enable-notifications') + '</div><p>Permiso: ' + ('Notification' in window ? esc(Notification.permission) : 'No disponible en este navegador') + '. Los avisos con la aplicación cerrada y los mensajes al paciente requieren un servicio Push externo.</p></section><section class="panel settings-card"><h2>Acerca de esta versión</h2><p>Azora 1.2 · primera versión funcional local para una práctica independiente. Agenda, pacientes, notas de seguimiento, pagos manuales y exportación de comprobantes.</p><div class="info-line">El servidor acepta conexiones únicamente desde esta computadora. El respaldo no es una cuenta en la nube.</div><div class="info-line">Los pagos se registran manualmente. Los cargos y las devoluciones se realizan por fuera de Azora.</div><p>La información de este espacio se utiliza desde esta computadora. No hay una cuenta en la nube.</p></section></div></div>';
 }
 function render() {
   if (!state) return;
@@ -216,11 +215,20 @@ function render() {
   main.querySelectorAll('table').forEach(table => table.querySelectorAll('th').forEach((th, index) => { table.querySelectorAll('tbody tr').forEach(row=>{if(row.children[index])row.children[index].dataset.label=th.textContent;}); if (/MXN|Importe|Costo|Recibido|Saldo/.test(th.textContent)) { th.classList.add('numeric'); table.querySelectorAll('tbody tr').forEach(row => row.children[index]?.classList.add('numeric')); } }));
   syncStatus();
 }
-function navigate(target) {
+function navigate(target, replace = false) {
   section = ['hoy', 'agenda', 'personas', 'cobros', 'ajustes'].includes(target) ? target : 'hoy';
   if (section !== 'personas') recordPatient = '';
-  history.replaceState(null, '', '#' + section); render(); window.scrollTo({ top: 0 });
+  if (location.hash !== '#' + section) history[replace ? 'replaceState' : 'pushState'](null, '', '#' + section);
+  render(); window.scrollTo({ top: 0 });
 }
+const formChanged = form => !!form && JSON.stringify([...new FormData(form)]) !== form.dataset.initial;
+function hasUnsavedChanges() { return (editor.open && formChanged(editor.querySelector('form'))) || formChanged($('#settings-form')); }
+async function mayLeave() {
+  if (editor.open && !(await closeEditor())) return false;
+  if (formChanged($('#settings-form')) && !(await askConfirmation('¿Salir sin guardar?', 'Los cambios de configuración todavía no se guardaron. Puedes seguir editando o descartarlos.', 'Salir sin guardar', true))) return false;
+  return true;
+}
+async function navigateSafely(target) { if (await mayLeave()) { recordPatient = ''; navigate(target); } }
 function dialog(title, content, eyebrow = '') {
   if (!editor.open) returnFocus = document.activeElement;
   editor.dataset.generation = state.generation;
@@ -231,7 +239,7 @@ function dialog(title, content, eyebrow = '') {
   const label = eyebrow || (isPatient ? 'FICHA DEL PACIENTE' : isAppointment ? 'AGENDA' : isNote ? 'EXPEDIENTE' : isPayment ? 'REGISTRO DE COBRO' : isReceipt ? 'COMPROBANTE' : isVoid ? 'ANULACIÓN DE PAGO' : 'AZORA');
   $('#dialog-content').innerHTML = '<div class="dialog-heading"><div><p>' + label + '</p><h2 id="dialog-title">' + title + '</h2></div><button class="dialog-close" data-action="close" aria-label="Cerrar editor">' + svg('close') + '</button></div><div class="dialog-body">' + content + '</div>';
   const form = editor.querySelector('form');
-  if (form) { prepareForm(form); editor.dataset.initial = JSON.stringify([...new FormData(form)]); }
+  if (form) prepareForm(form);
   if (!editor.open) editor.showModal();
   const input = editor.querySelector('input:not([type=hidden]),select,textarea');
   if (input) input.focus({preventScroll:true});
@@ -247,8 +255,9 @@ function appointmentDialog(id = '', patientId = '') {
   if (!data().patients.some(p => !p.archived) && !id) { patientDialog('', 'appointment'); return; }
   const draft = appointmentDraft; appointmentDraft = null;
   const a = appointment(id) || { patientId, date: draft?.date || selectedDate, time: draft?.time || '13:30', duration: draft?.duration || 45, service: draft?.service || '', priceCents: draft ? cents(draft.price) : 0, status: 'scheduled' };
+  const patientLocked = !!id && appointmentHasHistory(data(), id);
   const patients = data().patients.filter(p => !p.archived || p.id === a.patientId).sort((a,b)=>a.name.localeCompare(b.name));
-  dialog(id ? 'Editar cita' : 'Programar cita', '<form id="appointment-form" data-id="' + id + '">' + formSection('Paciente') + '<label>Paciente<select name="patientId" required><option value="">Busca un paciente en la lista</option>' + patients.map(p => '<option value="' + p.id + '"' + (p.id === a.patientId ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('') + '</select></label>' + (!id ? btn('Agregar paciente a la lista', 'patient-for-appointment', '', 'link small') : '') + formSection('Horario de la consulta', 'Jornada de ' + data().settings.start + ' a ' + data().settings.end + '. Azora comprueba los cruces de horario al guardar.') + '<div class="form-row"><label>Fecha<input name="date" type="date" value="' + a.date + '" required></label><label>Hora de inicio<input name="time" type="time" value="' + a.time + '" required></label></div><label>Duración <span class="field-hint">En minutos</span><input name="duration" type="number" min="5" max="480" step="5" value="' + a.duration + '" required inputmode="numeric"></label>' + formSection('Servicio y costo') + '<label>Servicio o motivo<input name="service" maxlength="160" value="' + esc(a.service) + '" placeholder="Por ejemplo, consulta de seguimiento" required></label><label>Costo de la consulta <span class="field-hint">Pesos mexicanos · MXN</span><input name="price" type="number" min="0" max="1000000" step=".01" value="' + a.priceCents/100 + '" required inputmode="decimal"></label>' + (id ? '<label>Estado de atención<select name="status">' + Object.entries(STATUSES).map(([value,label])=>'<option value="' + value + '"' + (value===a.status?' selected':'') + '>' + label + '</option>').join('') + '</select></label>' : '') + formEnd(id ? 'Guardar cambios de la cita' : 'Crear cita'));
+  dialog(id ? 'Editar cita' : 'Programar cita', '<form id="appointment-form" data-id="' + id + '">' + formSection('Paciente', patientLocked ? 'El paciente no puede cambiar porque esta cita ya tiene notas o pagos.' : '') + (patientLocked ? '<input id="appointment-locked-patient" type="hidden" name="patientId" value="' + a.patientId + '">' : '') + '<label>Paciente<select name="patientId" required' + (patientLocked ? ' disabled' : '') + '><option value="">Busca un paciente en la lista</option>' + patients.map(p => '<option value="' + p.id + '"' + (p.id === a.patientId ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('') + '</select></label>' + (!id ? btn('Agregar paciente a la lista', 'patient-for-appointment', '', 'link small') : '') + formSection('Horario de la consulta', 'Jornada de ' + data().settings.start + ' a ' + data().settings.end + '. Azora comprueba los cruces de horario al guardar.') + '<div class="form-row"><label>Fecha<input name="date" type="date" value="' + a.date + '" required></label><label>Hora de inicio<input name="time" type="time" value="' + a.time + '" required></label></div><label>Duración <span class="field-hint">En minutos</span><input name="duration" type="number" min="5" max="480" step="5" value="' + a.duration + '" required inputmode="numeric"></label>' + formSection('Servicio y costo') + '<label>Servicio o motivo<input name="service" maxlength="160" value="' + esc(a.service) + '" placeholder="Por ejemplo, consulta de seguimiento" required></label><label>Costo de la consulta <span class="field-hint">Pesos mexicanos · MXN</span><input name="price" type="number" min="0" max="1000000" step=".01" value="' + a.priceCents/100 + '" required inputmode="decimal"></label>' + (id ? '<label>Estado de atención<select name="status">' + Object.entries(STATUSES).map(([value,label])=>'<option value="' + value + '"' + (value===a.status?' selected':'') + '>' + label + '</option>').join('') + '</select></label>' : '') + formEnd(id ? 'Guardar cambios de la cita' : 'Crear cita'));
 }
 function noteDialog(patientId, appointmentId = '') {
   const p = patient(patientId); const a = appointment(appointmentId);
@@ -281,16 +290,18 @@ function askConfirmation(title, copy, actionLabel, danger = false) {
 }
 async function closeEditor() {
   const form=editor.querySelector('form');
-  const changed=form && JSON.stringify([...new FormData(form)])!==editor.dataset.initial;
-  if(changed && !(await askConfirmation('¿Salir sin guardar?', 'Los cambios de este formulario todavía no se han guardado. Puedes volver para terminarlos o salir y descartarlos.', 'Salir sin guardar',true))) return;
-  editor.close();
+  const changed=formChanged(form);
+  if(changed && !(await askConfirmation('¿Salir sin guardar?', 'Los cambios de este formulario todavía no se han guardado. Puedes volver para terminarlos o salir y descartarlos.', 'Salir sin guardar',true))) return false;
+  editor.close(); appointmentDraft = null;
   if(returnFocus?.isConnected) returnFocus.focus({preventScroll:true}); else main.focus({preventScroll:true});
+  return true;
 }
 function prepareForm(form) {
   form.noValidate=true;
   form.querySelectorAll('input,select,textarea').forEach(field=>{if(field.name&&!field.id)field.id=form.id+'-'+field.name;});
   if(!form.querySelector('.form-error')){const error=document.createElement('div');error.className='form-error';error.hidden=true;error.tabIndex=-1;error.setAttribute('role','alert');form.prepend(error);}
   else form.prepend(form.querySelector('.form-error'));
+  form.dataset.initial = JSON.stringify([...new FormData(form)]);
 }
 function clearFormErrors(form) {
   form.querySelectorAll('.field-error').forEach(el=>el.remove());
@@ -326,10 +337,9 @@ function download(name, content, type = 'application/json') {
 function exportBackup() {
   download('azora-respaldo-' + localDate() + '.json', JSON.stringify({ format: 'ronda-backup', exportedAt: new Date().toISOString(), data: data() }, null, 2));
 }
-async function restore(next) {
+async function restore(next, expectedGeneration = state.generation) {
   validateData(next);
-  await saveRecovery(state);
-  await commit(d => { for (const key of Object.keys(d)) delete d[key]; Object.assign(d, next); }, 'Respaldo restaurado. Conservamos una copia de recuperación.');
+  await commit(d => { for (const key of Object.keys(d)) delete d[key]; Object.assign(d, next); }, 'Respaldo restaurado. Conservamos una copia de recuperación.', expectedGeneration, true);
 }
 function shiftDay(delta) { const date = new Date(selectedDate + 'T12:00:00'); date.setDate(date.getDate() + delta); selectedDate = localDate(date); selectedAppointment = ''; render(); }
 
@@ -338,12 +348,12 @@ document.addEventListener('click', async event => {
   if (nav) {
     if (nav.tagName === 'A' && (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)) return;
     event.preventDefault();
-    if (editor.open) editor.close();
-    recordPatient = ''; navigate(nav.dataset.section); return;
+    await navigateSafely(nav.dataset.section); return;
   }
   const target = event.target.closest('[data-action]');
   if (!target || !state) return;
   const { action, id } = target.dataset;
+  const actionGeneration = state.generation;
   try {
     if (action === 'close') { await closeEditor(); return; }
     if (action === 'focus-field') { event.preventDefault(); document.getElementById(id)?.focus(); return; }
@@ -368,7 +378,7 @@ document.addEventListener('click', async event => {
       const p = patient(id);
       if (!p.archived && data().appointments.some(a => a.patientId === id && ['scheduled', 'arrived'].includes(a.status))) throw new Error('Atiende o cancela las citas pendientes antes de archivar al paciente.');
       if (!p.archived && !(await askConfirmation('Archivar a ' + esc(p.name), 'Su ficha dejará de aparecer en el directorio activo. El expediente, las consultas y los pagos se conservarán. Puedes reactivarla desde Pacientes archivados.', 'Archivar paciente'))) return;
-      return await commit(d => { const entry = d.patients.find(p => p.id === id); entry.archived = !entry.archived; }, p.archived ? 'Paciente reactivado.' : 'Paciente archivado.');
+      return await commit(d => { const entry = d.patients.find(p => p.id === id); entry.archived = !entry.archived; }, p.archived ? 'Paciente reactivado.' : 'Paciente archivado.', actionGeneration);
     }
     if (action === 'ledger-pending' || action === 'ledger-history') { ledgerFilter = action === 'ledger-pending' ? 'pending' : 'history'; render(); return; }
     if (action === 'void-payment') {
@@ -388,24 +398,31 @@ document.addEventListener('click', async event => {
     }
     if (action === 'export-backup') return exportBackup();
     if (action === 'open-settings') { editor.close(); navigate('ajustes'); return; }
-    if (action === 'sync') { await sync(); toast(conflict ? 'Revisa los cambios pendientes en Ajustes.' : syncError ? 'Datos locales guardados. El servidor todavía no está disponible.' : state.dirty ? 'Hay cambios pendientes de respaldo.' : 'Respaldo confirmado en el servidor local.'); return; }
+    if (action === 'sync') { await sync(); toast(conflict ? 'Revisa los cambios pendientes en Configuración.' : syncError ? 'Datos locales guardados. El servidor todavía no está disponible.' : state.dirty ? 'Hay cambios pendientes de respaldo.' : 'Respaldo confirmado en el servidor local.'); return; }
     if (action === 'enable-notifications') {
       if (!('Notification' in window)) throw new Error('Este navegador no admite notificaciones.');
       const permission = await Notification.requestPermission(); render(); toast(permission === 'granted' ? 'Recordatorios activados mientras la app esté abierta.' : 'Los avisos siguen desactivados.'); return;
     }
     if (action === 'resolve-conflict') {
+      if (!(await mayLeave())) return;
       const remote = await request('/api/state'); if (!remote.data) throw new Error('No hay información en el servidor.');
       validateData(remote.data);
       if (!(await askConfirmation('Cargar la copia de esta computadora', 'Se usará la versión respaldada en el servidor local. La versión actual del navegador quedará como copia de recuperación.', 'Cargar copia del servidor'))) return;
-      await saveRecovery(state); state = { ...state, data: remote.data, revision: remote.revision, syncedAt: remote.updatedAt, dirty: false, generation: uid() };
-      await saveWorkspace(state); conflict = false; syncError = ''; channel?.postMessage('changed'); render(); toast('Versión del servidor cargada.'); return;
+      await withWorkspaceLock(async () => {
+        const latest = await readWorkspace() || state;
+        if (latest.generation !== actionGeneration) throw new Error('Los datos cambiaron mientras confirmabas. Revisa la versión actual antes de reemplazarla.');
+        await saveRecovery(latest);
+        const next = { ...latest, data: remote.data, revision: remote.revision, syncedAt: remote.updatedAt, dirty: false, generation: uid() };
+        await saveWorkspace(next); state = next;
+      });
+      conflict = false; syncError = ''; channel?.postMessage('changed'); render(); toast('Versión del servidor cargada.'); return;
     }
     if (action === 'recover') {
       const recovery = await readRecovery(); if (!recovery) throw new Error('No hay una copia anterior para recuperar.');
-      if (await askConfirmation('Recuperar la copia anterior', 'Se restaurarán los pacientes, citas, notas y pagos de la copia anterior. Antes se conservará una copia del estado actual.', 'Recuperar copia')) await restore(recovery.data); return;
+      if (await askConfirmation('Recuperar la copia anterior', 'Se restaurarán los pacientes, citas, notas y pagos de la copia anterior. Antes se conservará una copia del estado actual.', 'Recuperar copia')) await restore(recovery.data, actionGeneration); return;
     }
     if (action === 'export-payments') {
-      const csvCell = value => '"' + String(value).replaceAll('"', '""').replace(/^[=+@-]/, "'$&") + '"';
+      // csvCell también neutraliza fórmulas precedidas por espacios o tabuladores.
       const rows = [['Folio', 'Fecha', 'Paciente', 'Servicio', 'Importe MXN', 'Método', 'Estado', 'Referencia']];
       data().payments.forEach(p => { const a = appointment(p.appointmentId); rows.push([p.id, p.createdAt, patientName(a.patientId), a.service, (p.amountCents / 100).toFixed(2), p.method, p.voidedAt ? 'Anulado' : 'Recibido', p.reference]); });
       download('azora-movimientos-' + localDate() + '.csv', '\ufeff' + rows.map(row => row.map(csvCell).join(',')).join('\r\n'), 'text/csv;charset=utf-8'); return;
@@ -428,29 +445,28 @@ document.addEventListener('submit', async event => {
       await commit(d => {
         const entry = { id, name: values.name, phone: values.phone, email: values.email, birthDate: values.birthDate, background: values.background, allergies: values.allergies, archived: d.patients.find(p => p.id === id)?.archived || false };
         const index = d.patients.findIndex(p => p.id === id); if (index >= 0) d.patients[index] = entry; else d.patients.push(entry);
-      }, 'Ficha del paciente guardada.');
+      }, 'Ficha del paciente guardada.', expected);
       if (after === 'appointment') appointmentDialog('', id); else editor.close();
     } else if (form.id === 'appointment-form') {
       const id = form.dataset.id || uid();
-      if (values.time < data().settings.start || minutes(values.time) + Number(values.duration) > minutes(data().settings.end)) throw new Error('La consulta debe quedar dentro del horario de tu jornada.');
       const nextStatus = values.status || 'scheduled';
       if (patient(values.patientId)?.archived && ['scheduled', 'arrived'].includes(nextStatus)) throw new Error('Reactiva al paciente antes de programar una nueva consulta.');
       if (nextStatus === 'cancelled' && appointment(id)?.status !== 'cancelled' && !(await askConfirmation('Cancelar la cita de ' + esc(patientName(values.patientId)), esc(shortDate(values.date) + ', ' + values.time + '. ') + 'El horario quedará disponible. Los pagos registrados se conservarán; una devolución debe hacerse por separado.', 'Cancelar cita',true))) return;
       await commit(d => {
-        const a = { id, patientId: values.patientId, date: values.date, time: values.time, duration: Number(values.duration), service: values.service, priceCents: cents(values.price), status: nextStatus };
+        const a = validateAppointmentChange(d, { id, patientId: values.patientId, date: values.date, time: values.time, duration: Number(values.duration), service: values.service, priceCents: cents(values.price), status: nextStatus });
         const index = d.appointments.findIndex(a => a.id === id); if (index >= 0) d.appointments[index] = a; else d.appointments.push(a);
-      }, 'Consulta guardada.'); selectedDate = values.date; selectedAppointment = id; editor.close(); render();
+      }, 'Consulta guardada.', expected); selectedDate = values.date; selectedAppointment = id; editor.close(); render();
     } else if (form.id === 'note-form') {
-      await commit(d => d.notes.push({ id: uid(), patientId: form.dataset.patient, appointmentId: form.dataset.appointment, content: values.content, plan: values.plan, createdAt: new Date().toISOString() }), 'Nota de seguimiento guardada.'); editor.close();
+      await commit(d => d.notes.push({ id: uid(), patientId: form.dataset.patient, appointmentId: form.dataset.appointment, content: values.content, plan: values.plan, createdAt: new Date().toISOString() }), 'Nota de seguimiento guardada.', expected); editor.close();
     } else if (form.id === 'payment-form') {
       const id = form.dataset.id, amountCents = cents(values.amount);
       if (!Number.isSafeInteger(amountCents) || amountCents <= 0 || amountCents > balanceFor(data(), appointment(id))) throw new Error('El importe debe ser mayor que cero y no superar el saldo pendiente.');
       const paymentId = uid();
-      await commit(d => d.payments.push({ id: paymentId, appointmentId: id, amountCents, method: values.method, reference: values.reference, createdAt: new Date().toISOString() }), 'Pago registrado.'); receiptDialog(paymentId);
+      await commit(d => d.payments.push({ id: paymentId, appointmentId: id, amountCents, method: values.method, reference: values.reference, createdAt: new Date().toISOString() }), 'Pago registrado.', expected); receiptDialog(paymentId);
     } else if (form.id === 'void-form') {
-      await commit(d => { const p = d.payments.find(p => p.id === form.dataset.id); if (p.voidedAt) throw new Error('Este pago ya está anulado.'); p.voidedAt = new Date().toISOString(); p.voidReason = values.reason; }, 'Registro anulado. El saldo fue actualizado.'); editor.close();
+      await commit(d => { const p = d.payments.find(p => p.id === form.dataset.id); if (p.voidedAt) throw new Error('Este pago ya está anulado.'); p.voidedAt = new Date().toISOString(); p.voidReason = values.reason; }, 'Registro anulado. El saldo fue actualizado.', expected); editor.close();
     } else if (form.id === 'settings-form') {
-      await commit(d => { d.settings = { ...values, reminderMinutes: Number(values.reminderMinutes) }; }, 'Configuración guardada.');
+      await commit(d => { d.settings = { ...values, reminderMinutes: Number(values.reminderMinutes) }; }, 'Configuración guardada.', expected);
     }
   } catch (error) { const field = /cruce|horario|jornada/.test(error.message) ? form.elements.time : /abonos|costo|saldo|importe/.test(error.message) ? form.elements.amount || form.elements.price : null; showFormErrors(form,[{field,message:error.message}]); }
   finally { if (submit.isConnected) submit.disabled = false; }
@@ -468,32 +484,42 @@ document.addEventListener('input', event => {
 });
 document.addEventListener('change', async event => {
   const el = event.target;
+  const actionGeneration = state?.generation;
   if (el.id === 'agenda-date' && el.value) { selectedDate = el.value; selectedAppointment=''; render(); }
   if (el.id === 'agenda-status') { statusFilter = el.value; render(); }
   if (el.id === 'archived-filter') { showArchived = el.checked; render(); }
   if (el.id === 'import-backup' && el.files[0]) {
     try {
+      if (!(await mayLeave())) return;
       if (el.files[0].size > 5 * 1024 * 1024) throw new Error('El respaldo supera 5 MB.');
       const file = JSON.parse(await el.files[0].text());
       if (file.format !== 'ronda-backup') throw new Error('Este archivo no es un respaldo de Azora.');
       validateData(file.data);
-      if (await askConfirmation('Restaurar respaldo', 'El archivo contiene ' + countLabel(file.data.patients.length,'paciente','pacientes') + ' y ' + countLabel(file.data.appointments.length,'cita','citas') + '. Reemplazará el espacio actual; antes se conservará una copia de recuperación.', 'Restaurar respaldo')) await restore(file.data);
+      if (await askConfirmation('Restaurar respaldo', 'El archivo contiene ' + countLabel(file.data.patients.length,'paciente','pacientes') + ' y ' + countLabel(file.data.appointments.length,'cita','citas') + '. Reemplazará el espacio actual; antes se conservará una copia de recuperación.', 'Restaurar respaldo')) await restore(file.data, actionGeneration);
     } catch (error) { toast(error.message); }
     finally { if (el.isConnected) el.value = ''; }
   }
 });
 $('#sync-button').addEventListener('click', () => {
-  if(conflict){navigate('ajustes');return;}
+  if(conflict){void navigateSafely('ajustes');return;}
   const heading = !navigator.onLine?'Trabajo sin conexión':state.dirty?'Cambios guardados en el navegador':state.syncedAt?'Copia local confirmada':'Guardado local disponible';
   dialog(heading,'<div class="storage-status-detail">'+svg('backup')+'<p>Azora guarda primero en este navegador. La copia del servidor se almacena en esta computadora; no es un respaldo en la nube.</p><dl><div><dt>Estado</dt><dd>'+esc($('#sync-copy').textContent)+'</dd></div><div><dt>Última copia confirmada</dt><dd>'+(state.syncedAt?datetime(state.syncedAt):'Todavía no se ha creado')+'</dd></div></dl></div><div class="button-group">'+btn('Actualizar copia ahora','sync','','primary')+btn('Ver configuración','open-settings')+'</div>','ALMACENAMIENTO');
 });
-window.addEventListener('hashchange', () => navigate(location.hash.slice(1)));
+window.addEventListener('hashchange', async () => {
+  const target = location.hash.slice(1);
+  if (await mayLeave()) { recordPatient = ''; navigate(target, true); }
+  else history.pushState(null, '', '#' + section);
+});
+window.addEventListener('beforeunload', event => { if (hasUnsavedChanges()) { event.preventDefault(); event.returnValue = ''; } });
 window.addEventListener('online', () => void sync());
 window.addEventListener('offline', syncStatus);
 window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); installPrompt = event; $('#install-button').hidden = false; });
 $('#install-button').addEventListener('click', async () => { if (installPrompt) { await installPrompt.prompt(); installPrompt = null; $('#install-button').hidden = true; } });
-document.addEventListener('keydown', event => { if (!editor.open && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName) && event.key.toLowerCase() === 'n') appointmentDialog(); });
-channel?.addEventListener('message', async () => { const latest = await readWorkspace(); if (latest && (latest.generation !== state?.generation || latest.revision !== state?.revision)) { const changed = latest.generation !== state?.generation; state = latest; if (changed && !editor.open) { render(); toast('Vista actualizada con los cambios de otra pestaña.'); } syncStatus(); } });
+document.addEventListener('keydown', event => {
+  if (!state || editor.open || $('#confirmation').open || event.ctrlKey || event.metaKey || event.altKey || document.activeElement?.isContentEditable || hasUnsavedChanges()) return;
+  if (!['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName) && event.key.toLowerCase() === 'n') { event.preventDefault(); appointmentDialog(); }
+});
+channel?.addEventListener('message', async () => { const latest = await readWorkspace(); if (latest && (latest.generation !== state?.generation || latest.revision !== state?.revision)) { const changed = latest.generation !== state?.generation; state = latest; if (changed && !editor.open && !hasUnsavedChanges()) { render(); toast('Vista actualizada con los cambios de otra pestaña.'); } syncStatus(); } });
 const reminded = new Set();
 async function checkReminders() {
   if (!state || !('Notification' in window) || Notification.permission !== 'granted') return;
@@ -517,7 +543,7 @@ async function boot() {
   }
   });
   validateData(state.data);
-  navigate(location.hash.slice(1) || 'hoy');
+  navigate(location.hash.slice(1) || 'hoy', true);
   if ('serviceWorker' in navigator) {
     try { await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }); } catch { toast('La app funciona, pero el modo sin conexión no pudo activarse.'); }
     navigator.serviceWorker.addEventListener('message', e => { if (e.data?.type === 'open-agenda') navigate('agenda'); });

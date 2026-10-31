@@ -1,6 +1,8 @@
-# Azora 1.1
+# Azora 1.2
 
 Aplicación PWA funcional básica para un profesional: pacientes, expedientes, citas y cobros. Conserva la composición de la agenda y el contexto persistente aprobados durante el boceto.
+
+**Nueva computadora:** sigue [INSTALACION.md](INSTALACION.md) para clonar en la universidad, arrancar Azora y trasladar tus registros mediante un respaldo privado. Consulta [SEGURIDAD.md](SEGURIDAD.md) antes de subir cambios a GitHub.
 
 ## Ejecutar
 
@@ -16,6 +18,8 @@ También puedes abrir Iniciar-Azora.cmd. Visita http://localhost:4187/ (o http:/
 
 El servidor escucha únicamente en 127.0.0.1. No usar python http.server: ese servidor no proporciona la API ni el respaldo SQLite.
 
+En PowerShell puedes usar `npm.cmd start` si la política del equipo bloquea npm.ps1. No hace falta desactivar esa política.
+
 ## Funciones implementadas
 
 - Alta y edición de pacientes, contacto, antecedentes y alergias. Archivo y reactivación sin perder historial.
@@ -30,12 +34,14 @@ El servidor escucha únicamente en 127.0.0.1. No usar python http.server: ese se
 - PWA instalable con iconos PNG, caché del shell y trabajo offline.
 - IndexedDB para datos del navegador y API Node/SQLite para respaldo real en este equipo.
 - Control de revisiones: un conflicto entre navegadores conserva la versión local y permite descargarla antes de cargar el servidor. Bloqueo de escritura entre pestañas del mismo origen.
+- Protección frente a formularios antiguos: conserva el texto escrito y rechaza guardados que sobrescribirían otra versión. Confirma la salida de Configuración con cambios pendientes.
+- Navegación compatible con Atrás/Adelante y protección del paciente asociado a citas con notas o pagos.
 
 ## Datos
 
 El espacio inicia vacío. Puedes agregar un paciente o cargar ejemplos ficticios desde la bienvenida. Las citas del prototipo anterior se migran si están en localStorage del mismo origen y cumplen las validaciones; el almacenamiento original no se borra.
 
-SQLite está en data/ronda.sqlite, con las últimas 20 revisiones en la tabla history. Esta carpeta se excluye de Git y nunca se sirve por HTTP. Los Word y el ZIP del prototipo tampoco están disponibles a través del servidor web. El ZIP prototipo-original.zip conserva los archivos anteriores a esta implementación.
+SQLite está en data/ronda.sqlite, con las últimas 20 revisiones en la tabla history. Esta carpeta se excluye de Git y nunca se sirve por HTTP. Los Word, ZIP y capturas de trabajo se conservan solo en la computadora donde se crearon; se retiraron del seguimiento de Git y no estarán en un clon nuevo después de publicar esta actualización. Tampoco están disponibles a través del servidor web.
 
 Los cambios se guardan primero en IndexedDB; el indicador confirma por separado cuándo el servidor recibió el respaldo. Si el servidor está detenido, se conserva el trabajo local y se vuelve a intentar al recuperar la conexión o cada 30 segundos. Para el funcionamiento offline, primero hay que abrir la aplicación con el servidor disponible.
 
@@ -55,12 +61,15 @@ npm test
 
 Incluye validación de relaciones, cruces de horario, saldos y anulaciones, rechazo de respaldos inválidos, persistencia tras reiniciar el servidor, control de revisión, restricción de origen y protección de rutas privadas. Las pruebas de API usan una carpeta temporal independiente.
 
+`npm run check` ejecuta las pruebas más la revisión de archivos/credenciales. `node scripts/security-check.mjs --history` revisa también el historial local con las limitaciones descritas en SEGURIDAD.md. Las automatizaciones preparadas para GitHub no requieren secretos propios ni claves de API.
+
 ## Archivos
 
 - index.html y ronda.css: interfaz operativa y diseño adaptable.
 - app.js: navegación, formularios, comprobantes, respaldo y sincronización.
 - domain.js: reglas de negocio compartidas entre cliente y servidor.
 - db.js: IndexedDB y migración del prototipo.
+- workspace.js: validación de cambios de generación y confirmaciones de respaldo.
 - server.js: servidor Node, API local y SQLite.
 - sw.js y manifest.webmanifest: capacidades PWA.
 - tests/: pruebas automatizadas del dominio y API.

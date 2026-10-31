@@ -1,5 +1,36 @@
 # Verificación de Azora
 
+## Primera versión funcional revisada 1.2 · 30 de octubre de 2026
+
+`npm run check`: 15 pruebas aprobadas y control de archivos/credenciales sin alertas en la versión actual. Las pruebas de servidor usan un puerto temporal asignado por el sistema y una base separada. No se instalaron paquetes externos.
+
+Correcciones con regresión automatizada:
+
+- Una cita con pagos (incluidos anulados) o notas no puede reasignarse a otro paciente desde la aplicación.
+- Es posible cancelar una cita histórica aunque el horario de la consulta haya cambiado. Una reprogramación activa sí debe respetar la jornada actual.
+- Guardado basado en la revisión actual de IndexedDB y rechazo de una generación antigua; confirmación de respaldo sin descartar cambios que llegaron mientras se enviaba.
+- Control del límite de 5 MB antes de confirmar un cambio local.
+- Fallos de apertura de IndexedDB capturables por el arranque; migración tolerante a localStorage no disponible.
+- Lectura correcta de JSON UTF-8 con una letra ñ dividida entre fragmentos de la petición.
+- Rechazo de revisiones inválidas, JSON incorrecto, peticiones superiores a 5 MB y solicitudes API de origen externo; rutas privadas no servidas.
+- CSV protegido frente a fórmulas, incluso con espacios o caracteres de control iniciales.
+
+Comprobaciones de navegador con datos ficticios en 127.0.0.1:14188 (no en el espacio principal):
+
+- Alta de Begoña Núñez de prueba con acentos y antecedentes; consulta de su expediente.
+- Cita del 30 de octubre a las 10:00 por $725.50, nota asociada y abono de $200: comprobante y saldo $525.50.
+- Selector de paciente bloqueado al editar esa cita con historia; guardado de los demás campos sin perder la relación.
+- Configuración modificada sin guardar: aviso de salida y continuación de la edición.
+- Dos pestañas: la primera conserva su texto pendiente cuando la segunda guarda y rechaza sobrescribir la nueva versión desde el formulario antiguo.
+- Atrás y Adelante entre las secciones principales verificados.
+- Sin servidor de QA: recarga correcta del shell PWA, la cita y su nota desde el navegador. La nueva dependencia workspace.js también está incluida en la caché. No se detectaron errores de consola antes de la desconexión intencional.
+
+Evidencia visual ficticia: artifacts/azora-v1.2-prueba.jpg (excluida de Git). El servidor de QA se detuvo y se dejó abierta la URL principal 127.0.0.1:4187; los datos de prueba no se cargaron en el espacio principal.
+
+Revisión de Git: 7 archivos de trabajo retirados del índice, conservando las copias locales. El detector de patrones no encontró credenciales en el texto del único commit local disponible; advierte que esos 7 archivos siguen en el historial. No inspecciona el interior de binarios ni referencias que no estén en este clon. No se hizo commit, push ni reescritura del historial. GitHub Actions está preparado, no ejecutado remotamente durante esta revisión.
+
+Guías añadidas: INSTALACION.md y SEGURIDAD.md. Continúan los límites de uso local, falta de autenticación/cifrado y notificaciones solo mientras la app está abierta; no se completó una instalación PWA en el sistema operativo.
+
 ## Rediseño 1.1 · 23 de octubre de 2026
 
 ### Actualización de navegación horizontal

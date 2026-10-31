@@ -15,6 +15,26 @@ const isoDate = date => typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d
 const time = value => typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
 const amount = value => Number.isSafeInteger(value) && value >= 0 && value <= 100000000;
 
+export const appointmentHasHistory = (data, id) => data.payments.some(p => p.appointmentId === id) || data.notes.some(n => n.appointmentId === id);
+export function validateAppointmentChange(data, next) {
+  const previous = data.appointments.find(a => a.id === next.id);
+  if (previous && previous.patientId !== next.patientId && appointmentHasHistory(data, next.id)) {
+    fail('Esta cita tiene notas o pagos. No se puede cambiar de paciente; cancela la cita y crea otra si hace falta.');
+  }
+  if (data.patients.find(p => p.id === next.patientId)?.archived && ['scheduled', 'arrived'].includes(next.status)) fail('Reactiva al paciente antes de programar una nueva consulta.');
+  const rescheduled = !previous || previous.date !== next.date || previous.time !== next.time || previous.duration !== next.duration || previous.status === 'cancelled';
+  if (next.status !== 'cancelled' && rescheduled && (next.time < data.settings.start || minutes(next.time) + next.duration > minutes(data.settings.end))) {
+    fail('La consulta debe quedar dentro del horario de tu jornada.');
+  }
+  return next;
+}
+
+export function csvCell(value) {
+  let cell = String(value ?? '');
+  if (/^[\s\uFEFF]*[=+@-]|^[\t\r\n]/.test(cell)) cell = "'" + cell;
+  return '"' + cell.replaceAll('"', '""') + '"';
+}
+
 export function validateData(data) {
   if (!data || data.version !== 1) fail('Formato de datos no compatible.');
   for (const key of ['patients', 'appointments', 'notes', 'payments']) {

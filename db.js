@@ -6,8 +6,11 @@ const openDB = () => new Promise((resolve, reject) => {
   request.onsuccess = () => resolve(request.result);
   request.onerror = () => reject(request.error);
 });
-const db = await openDB();
-function operation(mode, callback) {
+let dbPromise;
+async function operation(mode, callback) {
+  // La apertura se difiere para que boot() pueda mostrar un error recuperable.
+  dbPromise ||= openDB();
+  const db = await dbPromise;
   return new Promise((resolve, reject) => {
     const tx = db.transaction('workspace', mode);
     const req = callback(tx.objectStore('workspace'));
@@ -23,9 +26,9 @@ export const readRecovery = () => operation('readonly', store => store.get('reco
 export const withWorkspaceLock = task => navigator.locks ? navigator.locks.request('ronda-data-write', task) : task();
 export function migratePrototype() {
   const data = emptyData();
-  const raw = localStorage.getItem('ronda-appointments-v1');
-  if (!raw) return data;
   try {
+    const raw = localStorage.getItem('ronda-appointments-v1');
+    if (!raw) return data;
     const old = JSON.parse(raw);
     if (!Array.isArray(old)) return data;
     for (const a of old) {
