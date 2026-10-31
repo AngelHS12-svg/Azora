@@ -1,0 +1,50 @@
+{
+  "id": "/",
+  "name": "Azora — Agenda, expedientes y cobros",
+  "short_name": "Azora",
+  "description": "Agenda de consultas, expedientes de pacientes y registro de cobros para tu práctica independiente.",
+  "lang": "es-MX",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": [
+    "standalone"
+  ],
+  "orientation": "any",
+  "background_color": "#f5f6f3",
+  "theme_color": "#253e4d",
+  "prefer_related_applications": false,
+  "categories": [
+    "business",
+    "productivity",
+    "medical"
+  ],
+  "shortcuts": [
+    {
+      "name": "Nueva cita",
+      "short_name": "Nueva cita",
+      "description": "Abrir la captura rápida de una cita",
+      "url": "./?action=new"
+    }
+  ],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
